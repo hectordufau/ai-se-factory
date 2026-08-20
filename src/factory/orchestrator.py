@@ -13,6 +13,7 @@ from typing import Optional
 
 from factory.agent import AgentContext
 from factory.bus import EventBus
+from factory.evals.eval import EvalHarness
 from factory.guardrails import CircuitBreaker, Gate
 from factory.models import Artifact, RunResult, TaskStatus
 from factory.task_dag import TaskDag
@@ -110,6 +111,11 @@ class Orchestrator:
             if not progressed:
                 break
         result.success = (not failed) and self.dag.is_complete()
+        # automated evaluation: score the run and embed it in metrics
+        try:
+            result.metrics["eval"] = EvalHarness().score(result).__dict__
+        except Exception:
+            pass
         if self.bus:
             self.bus.publish(
                 {"type": "run.done", "success": result.success, "run_id": result.run_id}
