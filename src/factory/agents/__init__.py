@@ -14,6 +14,7 @@ from factory.guardrails import RoleScope
 from factory.llm import LLMClient
 from factory.model_router import ModelRouter
 from factory.mcp_base import MCPServer
+from factory.models import Artifact, ArtifactKind
 
 
 class RoleAgent(Agent):
@@ -45,6 +46,80 @@ class RoleAgent(Agent):
     async def _complete(self, messages, model=None, **kw):
         task_type = ROLE_TASK_TYPE.get(self.role, "coding")
         return await self._router.complete_for_task(self._client, task_type, messages, **kw)
+
+    # --- File-writing support (Nível B): parse a <<<FILES>>> block from the
+    # LLM output and persist each file via the scoped FilesystemMCP. ---
+    def _parse_files(self, text: str) -> list[tuple[str, str]]:
+        files: list[tuple[str, str]] = []
+        marker = "<<<FILES>>>"
+        if marker not in text:
+            return files
+        body = text.split(marker, 1)[1]
+        for chunk in body.split("<<<END>>>"):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            # format: PATH: <relpath>\n```\n<content>\n```
+            if not chunk.startswith("PATH:"):
+                continue
+            line, _, rest = chunk.partition("\n")
+            path = line[len("PATH:"):].strip()
+            # strip surrounding code fences
+            rest = rest.strip()
+            if rest.startswith("```"):
+                rest = rest[3:]
+                if rest.endswith("```"):
+                    rest = rest[:-3]
+            files.append((path, rest.strip()))
+        return files
+
+    async def write_files(self, text: str) -> list[Artifact]:
+        """Persist any files the LLM produced, via the scoped filesystem MCP."""
+        if "filesystem" not in self._mcp:
+            return []
+        out: list[Artifact] = []
+        for path, content in self._parse_files(text):
+            try:
+                self.call_mcp("filesystem", "write_file", {"path": path, "content": content})
+                out.append(
+                    Artifact(
+                        kind=ArtifactKind.CODE,
+                        path=path,
+                        content=content,
+                        agent=self.role,
+                        meta={"tool": "filesystem.write"},
+                    )
+                )
+            except Exception:
+                # scope/IO errors are surfaced as failed artifacts
+                out.append(
+                    Artifact(
+                        kind=ArtifactKind.CODE,
+                        path=path,
+                        content=content,
+                        agent=self.role,
+                        meta={"tool": "filesystem.write", "error": "write_failed"},
+                    )
+                )
+        return out
+
+    async def run(self, ctx: AgentContext) -> list[Artifact]:
+        """Run the agent, then persist any files it produced via MCP.
+
+        Falls back to the base Agent.run (text-only artifacts) when no
+        filesystem MCP is wired in.
+        """
+        artifacts = await super().run(ctx)
+        if "filesystem" in self._mcp:
+            # re-run is cheap; we parse the last text artifact for file blocks
+            last_text = next(
+                (a.content for a in reversed(artifacts)
+                 if a.kind in (ArtifactKind.CODE, ArtifactKind.REPORT)),
+                "",
+            )
+            written = await self.write_files(last_text)
+            artifacts.extend(written)
+        return artifacts
 
     def available_tools(self) -> list[dict]:
         """Describe MCP tools available to this agent (for the LLM prompt)."""

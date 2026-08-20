@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m venv .venv && . .venv/bin/activate
+          pip install -e ".[dev]"
+      - name: Run tests (no network)
+        run: |
+          . .venv/bin/activate
+          pytest -q
+
+  smoke:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[smoke]')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m venv .venv && . .venv/bin/activate
+          pip install -e ".[dev]"
+      - name: Run smoke tests (real LLM)
+        env:
+          OPENCODE_ZEN_AUTH_PATH: ${{ secrets.OPENCODE_ZEN_AUTH_PATH }}
+          NOUS_AUTH_PATH: ${{ secrets.NOUS_AUTH_PATH }}
+        run: |
+          . .venv/bin/activate
+          pytest -m smoke -q
