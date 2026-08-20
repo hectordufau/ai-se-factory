@@ -1,48 +1,30 @@
 """LLM provider adapter.
 
-Primary provider: OpenCode Zen gateway (OpenAI-compatible). Defaults to
-`opencode/big-pickle`. Key resolution: env `OPENCODE_ZEN_KEY` -> auth.json
-(`~/.local/share/opencode/auth.json`). Never hard-codes secrets.
+Primary provider: OpenCode Zen gateway (OpenAI-compatible). Optional secondary:
+Hermes/Nous (`tencent/hy3:free`). Key resolution never hard-codes secrets —
+it reads from `~/.local/share/opencode/auth.json` (Zen) or
+`~/.hermes/auth.json` (Nous). The adapter strips the `opencode/` provider
+prefix because the raw Zen HTTP API expects the bare model id.
 """
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import time
-from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from factory.config import Settings, get_settings
+from factory.providers import ProviderConfig, get_provider
 
 
-def resolve_zen_key(
-    settings: Optional[Settings] = None,
-    auth_path: Optional[Path] = None,
-) -> str:
-    """Resolve the OpenCode Zen API key.
+def build_client(provider: str = "nous", client: Any = None) -> "LLMClient":
+    """Create an LLMClient for a named provider (nous | zen).
 
-    Priority: OPENCODE_ZEN_KEY env -> `opencode.key` in auth.json.
-    `auth_path` allows tests to inject a path without touching global settings.
-    Raises a clear error if neither is available.
+    Default is `nous` (Hermes/Nous `tencent/hy3:free`) because the Zen
+    `big-pickle` free tier is intermittently rate-limited. `big-pickle` remains
+    available via provider="zen".
     """
-    settings = settings or get_settings()
-    env_key = os.environ.get("OPENCODE_ZEN_KEY")
-    if env_key:
-        return env_key
-    auth_path = auth_path or settings.zen_auth_path
-    if auth_path.exists():
-        try:
-            data = json.loads(auth_path.read_text())
-            key = data.get("opencode", {}).get("key")
-            if key:
-                return key
-        except (json.JSONDecodeError, OSError):
-            pass
-    raise RuntimeError(
-        "OpenCode Zen key not found. Set OPENCODE_ZEN_KEY or ensure "
-        f"{auth_path} contains {{\"opencode\": {{\"type\": \"api\", \"key\": ...}}}}"
-    )
+    cfg = get_provider(provider)
+    if not cfg.api_key:
+        raise RuntimeError(f"No API key resolved for provider {provider!r}")
+    return LLMClient(base_url=cfg.base_url, default_model=cfg.default_model, api_key=cfg.api_key, client=client)
 
 
 class LLMClient:
@@ -50,15 +32,14 @@ class LLMClient:
 
     def __init__(
         self,
-        settings: Optional[Settings] = None,
-        api_key: Optional[str] = None,
+        base_url: str,
+        default_model: str,
+        api_key: str,
         client: Any = None,
     ) -> None:
-        self.settings = settings or get_settings()
-        self.base_url = self.settings.zen_base_url
-        self.default_model = self.settings.zen_model
-        self._api_key = api_key or resolve_zen_key(self.settings)
-        # `client` is injectable for tests; otherwise lazily created.
+        self.base_url = base_url
+        self.default_model = default_model
+        self._api_key = api_key
         self._client = client
 
     @property
@@ -83,6 +64,12 @@ class LLMClient:
     ) -> str:
         """Return the assistant message content for a chat completion."""
         model = model or self.default_model
+        # The OpenCode CLI uses names like "opencode/big-pickle", but the raw
+        # Zen HTTP API expects the bare model id ("big-pickle"). Strip only the
+        # "opencode/" provider prefix; other providers (e.g. "tencent/hy3:free"
+        # on Nous) need the full id.
+        if model.startswith("opencode/"):
+            model = model[len("opencode/"):]
         last_err: Optional[Exception] = None
         for attempt in range(1, max_retries + 1):
             try:
@@ -92,7 +79,13 @@ class LLMClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
-                return resp.choices[0].message.content or ""
+                msg = resp.choices[0].message
+                # Some reasoning models return text in `reasoning_content`
+                # instead of `content`; support both.
+                content = getattr(msg, "content", None) or ""
+                if not content:
+                    content = getattr(msg, "reasoning_content", None) or ""
+                return content
             except Exception as exc:  # transient network/API errors
                 last_err = exc
                 if attempt >= max_retries:

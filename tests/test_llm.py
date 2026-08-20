@@ -1,6 +1,7 @@
 """Tests for the LLM provider adapter (OpenCode Zen / OpenAI-compatible).
 
-These tests never hit the network — they mock the underlying HTTP client.
+These tests never hit the network — they mock the underlying HTTP client or
+inject a fake client via build_client(provider, client=...).
 """
 import os
 import json
@@ -9,9 +10,9 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from factory.llm import LLMClient, resolve_zen_key
+from factory.llm import LLMClient, build_client
 from factory.model_router import ModelRouter, ModelSpec
-from factory.config import Settings
+from factory.providers import ProviderConfig
 
 
 def _write_auth(tmp_path: Path, key: str = "sk-test123") -> Path:
@@ -21,70 +22,66 @@ def _write_auth(tmp_path: Path, key: str = "sk-test123") -> Path:
 
 
 @pytest.mark.asyncio
-async def test_default_endpoint_and_model():
-    """Adapter points at the OpenCode Zen gateway with big-pickle by default."""
-    with patch.dict(os.environ, {}, clear=True):
-        # ensure no inherited env leaks
-        os.environ.pop("OPENCODE_ZEN_BASE_URL", None)
-        os.environ.pop("OPENCODE_ZEN_MODEL", None)
-        client = LLMClient()
-        assert client.base_url == "https://opencode.ai/zen/v1"
-        assert client.default_model == "opencode/big-pickle"
+async def test_prefix_stripped_for_bare_model_id():
+    """Zen HTTP API wants bare id ('big-pickle'), not 'opencode/big-pickle'."""
+    client = LLMClient(base_url="https://x", default_model="big-pickle", api_key="k")
+    fake = MagicMock()
+    fake.choices = [MagicMock(message=MagicMock(content="hi", reasoning_content=None))]
+    with patch.object(client, "_client") as mc:
+        mc.chat.completions.create = AsyncMock(return_value=fake)
+        await client.complete([{"role": "user", "content": "x"}], model="opencode/big-pickle")
+        assert mc.chat.completions.create.call_args.kwargs["model"] == "big-pickle"
 
 
 @pytest.mark.asyncio
-async def test_key_from_env(tmp_path: Path):
-    auth = _write_auth(tmp_path, "sk-envpriority")
-    with patch.dict(os.environ, {"OPENCODE_ZEN_KEY": "sk-fromenv", "OPENCODE_ZEN_AUTH_PATH": str(auth)}):
-        # env key wins over auth file
-        assert resolve_zen_key() == "sk-fromenv"
+async def test_reasoning_content_fallback():
+    """Reasoning models may return text in reasoning_content, not content."""
+    client = LLMClient(base_url="https://x", default_model="big-pickle", api_key="k")
+    fake = MagicMock()
+    fake.choices = [MagicMock(message=MagicMock(content=None, reasoning_content="thought"))]
+    with patch.object(client, "_client") as mc:
+        mc.chat.completions.create = AsyncMock(return_value=fake)
+        out = await client.complete([{"role": "user", "content": "x"}])
+    assert out == "thought"
 
 
 @pytest.mark.asyncio
-async def test_key_from_auth_file(tmp_path: Path):
-    auth = _write_auth(tmp_path)
+async def test_build_client_zen_uses_auth_file(tmp_path: Path):
+    auth = _write_auth(tmp_path, "sk-fromfile")
     with patch.dict(os.environ, {}, clear=True):
+        os.environ["OPENCODE_ZEN_AUTH_PATH"] = str(auth)
         os.environ.pop("OPENCODE_ZEN_KEY", None)
-        assert resolve_zen_key(auth_path=auth) == "sk-test123"
+        client = build_client("zen", client=MagicMock())
+    assert client.default_model == "big-pickle"
+    assert client._api_key == "sk-fromfile"
 
 
 @pytest.mark.asyncio
-async def test_complete_returns_content_and_uses_model(tmp_path: Path):
-    auth = _write_auth(tmp_path)
-    with patch.dict(os.environ, {"OPENCODE_ZEN_AUTH_PATH": str(auth), "OPENCODE_ZEN_KEY": "sk-x"}):
-        client = LLMClient()
-        fake_msg = MagicMock()
-        fake_msg.choices = [MagicMock(message=MagicMock(content="hello world"))]
-        with patch.object(client, "_client") as mock_client:
-            mock_client.chat.completions.create = AsyncMock(return_value=fake_msg)
-            out = await client.complete([{"role": "user", "content": "hi"}], model="opencode/big-pickle")
-        assert out == "hello world"
-        # verify the call used the requested model
-        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["model"] == "opencode/big-pickle"
-        assert call_kwargs["messages"][0]["content"] == "hi"
+async def test_build_client_nous():
+    client = build_client("nous", client=MagicMock())
+    assert client.base_url.endswith("nousresearch.com/v1") or "nous" in client.base_url
+    assert client.default_model == "tencent/hy3:free"
 
 
 @pytest.mark.asyncio
 async def test_model_router_spec():
     """ModelRouter maps task types to model classes (mirrors architecture doc)."""
-    from factory.model_router import ModelRouter
-    router = ModelRouter(default_model="opencode/big-pickle")
+    router = ModelRouter(default_model="tencent/hy3:free")
     assert router.select("planning").model_class == "reasoning"
     assert router.select("coding").model_class == "coding"
     assert router.select("routing").model_class == "fast"
+    # concrete model is the provider default, not a hardcoded name
+    assert router.select("planning").model == "tencent/hy3:free"
 
 
 @pytest.mark.asyncio
-async def test_retry_on_transient_error(tmp_path: Path):
-    auth = _write_auth(tmp_path)
-    with patch.dict(os.environ, {"OPENCODE_ZEN_AUTH_PATH": str(auth), "OPENCODE_ZEN_KEY": "sk-x"}):
-        client = LLMClient()
-        fake_msg = MagicMock()
-        fake_msg.choices = [MagicMock(message=MagicMock(content="ok"))]
-        with patch.object(client, "_client") as mock_client:
-            create = AsyncMock(side_effect=[RuntimeError("transient"), fake_msg])
-            mock_client.chat.completions.create = create
-            out = await client.complete([{"role": "user", "content": "x"}], max_retries=2)
-        assert out == "ok"
-        assert create.call_count == 2
+async def test_retry_on_transient_error():
+    client = LLMClient(base_url="https://x", default_model="big-pickle", api_key="k")
+    fake = MagicMock()
+    fake.choices = [MagicMock(message=MagicMock(content="ok"))]
+    with patch.object(client, "_client") as mc:
+        create = AsyncMock(side_effect=[RuntimeError("transient"), fake])
+        mc.chat.completions.create = create
+        out = await client.complete([{"role": "user", "content": "x"}], max_retries=2)
+    assert out == "ok"
+    assert create.call_count == 2

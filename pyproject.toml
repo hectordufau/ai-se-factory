@@ -23,3 +23,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "smoke: real LLM/network call (run with `pytest -m smoke`)",
+]
+addopts = "-m 'not smoke'"

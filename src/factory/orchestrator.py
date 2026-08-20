@@ -30,9 +30,13 @@ class Orchestrator:
         self.agents = agents
         self.bus = bus
         self.gates = gates or {}
+        self._result: Optional[RunResult] = None
 
     async def run(self, requirement: str) -> RunResult:
-        result = RunResult(requirement=requirement)
+        # Persist the result across calls so artifacts survive HITL gate waits.
+        if self._result is None:
+            self._result = RunResult(requirement=requirement)
+        result = self._result
         failed = False
         # topological waves
         while not self.dag.is_complete():
@@ -40,15 +44,18 @@ class Orchestrator:
             if not ready:
                 # nothing ready but not complete -> deadlock/blocked gates
                 break
+            progressed = False
             for task_id in sorted(ready):
                 task = next(t for t in self.dag.tasks() if t.id == task_id)
                 # HITL gate?
                 gate = self.gates.get(task_id)
                 if gate is not None and gate.decide().value == "block":
-                    self.dag.mark_running(task_id)
+                    # leave the task READY (not running) so it re-evaluates once
+                    # the gate is approved; skip this wave without progress.
                     if self.bus:
                         self.bus.publish({"type": "gate.blocked", "task": task_id, "gate": gate.name})
                     continue
+                progressed = True
                 self.dag.mark_running(task_id)
                 agent = self.agents.get(task.agent)
                 if agent is None:
@@ -71,6 +78,9 @@ class Orchestrator:
                 except Exception:
                     self.dag.mark_failed(task_id)
                     failed = True
+            if not progressed:
+                # all ready tasks are gated -> wait for human approval, stop loop
+                break
         # success requires all tasks done and no failures
         result.success = (not failed) and self.dag.is_complete()
         if self.bus:
