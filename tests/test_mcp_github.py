@@ -10,11 +10,25 @@ class _FakeRepo:
         self.commits = []
         self.prs = []
         self.files = {"README.md": "hello"}
+        self.branches = {"main": type("B", (), {"commit": type("C", (), {"sha": "baseSHA"})()})()}
 
-    def get_contents(self, path):
+    def get_branch(self, name):
+        if name in self.branches:
+            return self.branches[name]
+        raise Exception("404 branch")
+
+    def create_git_ref(self, ref, sha):
+        name = ref.split("/")[-1]
+        self.branches[name] = type("B", (), {"commit": type("C", (), {"sha": sha})()})()
+
+    def get_contents(self, path, ref=None):
         if path in self.files:
             return type("C", (), {"decoded_content": self.files[path].encode()})()
         raise Exception("404")
+
+    def create_file(self, path, message, content, branch=None):
+        self.files[path] = content
+        return type("F", (), {})()
 
     def create_pull(self, title, body, head, base):
         self.prs.append({"title": title, "head": head, "base": base})

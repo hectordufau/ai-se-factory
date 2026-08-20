@@ -27,7 +27,7 @@ class GitHubMCP(MCPServer):
             github = Github(token)
         self._gh = github
         self.register(Tool("read_file", "Read a file from the repo.", self._read, ["path"]))
-        self.register(Tool("open_pr", "Open a pull request.", self._open_pr, ["title", "body", "head", "base"]))
+        self.register(Tool("open_pr", "Open a pull request.", self._open_pr, ["title", "body", "head", "base", "files"]))
 
     def _repo(self):
         return self._gh.get_repo(self.repo)
@@ -40,10 +40,28 @@ class GitHubMCP(MCPServer):
             raise ToolError(f"read_file failed: {e}") from e
 
     def _open_pr(self, args: dict) -> dict:
-        pr = self._repo().create_pull(
+        repo = self._repo()
+        head = args["head"]
+        base = args["base"]
+        # ensure the head branch exists (create from base if missing)
+        try:
+            repo.get_branch(head)
+        except Exception:
+            base_sha = repo.get_branch(base).commit.sha
+            repo.create_git_ref(f"refs/heads/{head}", base_sha)
+        # optionally create/update files on the new branch
+        for path, content in (args.get("files") or {}).items():
+            try:
+                existing = repo.get_contents(path, ref=head)
+                repo.update_file(
+                    path, f"Add {path}", content, existing.sha, branch=head
+                )
+            except Exception:
+                repo.create_file(path, f"Add {path}", content, branch=head)
+        pr = repo.create_pull(
             title=args["title"],
             body=args.get("body", ""),
-            head=args["head"],
-            base=args["base"],
+            head=head,
+            base=base,
         )
         return {"number": pr.number, "html_url": pr.html_url}
