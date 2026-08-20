@@ -63,7 +63,7 @@ async def test_full_factory_run_with_hitl(tmp_path):
     dag.add("backend", deps=["arch"], agent="backend")
     dag.add("release", deps=["backend"], agent="reviewer")
 
-    gates = {"release": Gate(name="release", auto_approve=False)}
+    gates = {"release": Gate(name="release", mandatory=True)}
     orch = Orchestrator(dag=dag, agents=agents, bus=bus, gates=gates)
 
     # First run: release blocked by HITL

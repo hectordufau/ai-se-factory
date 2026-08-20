@@ -64,8 +64,8 @@ async def test_orchestrator_blocks_on_hitl_gate(tmp_path):
         "planner": _make_agent("planner", bus, produce),
         "reviewer": _make_agent("reviewer", bus, produce),
     }
-    # release gate is BLOCKED (not approved)
-    gates = {"release": Gate(name="release", auto_approve=False)}
+    # release gate is BLOCKED (not approved) by default
+    gates = {"release": Gate(name="release", mandatory=True)}
     orch = Orchestrator(dag=dag, agents=agents, bus=bus, gates=gates)
     result = await orch.run(requirement="X")
     # planner ran, release blocked -> run not successful

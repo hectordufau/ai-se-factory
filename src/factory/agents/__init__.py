@@ -10,6 +10,7 @@ from typing import Callable
 
 from factory.agent import Agent, AgentContext
 from factory.agents.prompts import ROLE_PROMPTS, ROLE_TASK_TYPE
+from factory.guardrails import RoleScope
 from factory.llm import LLMClient
 from factory.model_router import ModelRouter
 from factory.mcp_base import MCPServer
@@ -29,6 +30,7 @@ class RoleAgent(Agent):
         self._client = client
         self._router = router
         self._mcp: dict[str, MCPServer] = {}
+        self._scope = RoleScope.for_role(role)
         self.task_type = ROLE_TASK_TYPE.get(role, "coding")
         model_class = router.select(self.task_type).model_class
         super().__init__(
@@ -51,6 +53,16 @@ class RoleAgent(Agent):
             for srv, mcp in self._mcp.items()
             for t in mcp.tool_names()
         ]
+
+    def call_mcp(self, server: str, tool: str, args: dict | None = None) -> dict:
+        """Invoke an MCP tool, enforcing this role's scope (guardrail)."""
+        self._scope.enforce(server, tool)
+        mcp = self._mcp.get(server)
+        if mcp is None:
+            from factory.mcp_base import ToolError
+
+            raise ToolError(f"MCP server {server!r} not available to role {self.role!r}")
+        return mcp.call(tool, args)
 
 
 def build_agents(

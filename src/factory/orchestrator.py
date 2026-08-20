@@ -13,7 +13,7 @@ from typing import Optional
 
 from factory.agent import AgentContext
 from factory.bus import EventBus
-from factory.guardrails import Gate
+from factory.guardrails import CircuitBreaker, Gate
 from factory.models import Artifact, RunResult, TaskStatus
 from factory.task_dag import TaskDag
 
@@ -25,12 +25,24 @@ class Orchestrator:
         agents: dict[str, object],
         bus: Optional[EventBus] = None,
         gates: Optional[dict[str, Gate]] = None,
+        # task_id -> gate that must be approved before the task may run
+        required_gates: Optional[dict[str, str]] = None,
+        # max retries per task before the circuit breaker trips
+        max_attempts: int = 3,
     ) -> None:
         self.dag = dag
         self.agents = agents
         self.bus = bus
         self.gates = gates or {}
+        self.required_gates = required_gates or {}
+        self.max_attempts = max_attempts
+        self._breakers: dict[str, CircuitBreaker] = {}
         self._result: Optional[RunResult] = None
+
+    def _breaker(self, task_id: str) -> CircuitBreaker:
+        if task_id not in self._breakers:
+            self._breakers[task_id] = CircuitBreaker(max_attempts=self.max_attempts)
+        return self._breakers[task_id]
 
     async def run(self, requirement: str) -> RunResult:
         # Persist the result across calls so artifacts survive HITL gate waits.
@@ -42,19 +54,34 @@ class Orchestrator:
         while not self.dag.is_complete():
             ready = self.dag.ready()
             if not ready:
-                # nothing ready but not complete -> deadlock/blocked gates
                 break
             progressed = False
             for task_id in sorted(ready):
                 task = next(t for t in self.dag.tasks() if t.id == task_id)
-                # HITL gate?
+                # Required (mandatory) gate for this task?
+                req_gate = self.required_gates.get(task_id)
+                if req_gate is not None:
+                    gate = self.gates.get(req_gate)
+                    if gate is None or gate.decide().value == "block":
+                        if self.bus:
+                            self.bus.publish({"type": "gate.blocked", "task": task_id, "gate": req_gate})
+                        continue
+                # Direct HITL gate on the task itself?
                 gate = self.gates.get(task_id)
                 if gate is not None and gate.decide().value == "block":
-                    # leave the task READY (not running) so it re-evaluates once
-                    # the gate is approved; skip this wave without progress.
                     if self.bus:
                         self.bus.publish({"type": "gate.blocked", "task": task_id, "gate": gate.name})
                     continue
+                # Circuit breaker: stop retrying a persistently failing task.
+                breaker = self._breaker(task_id)
+                if breaker.tripped:
+                    self.dag.mark_failed(task_id)
+                    failed = True
+                    progressed = True
+                    if self.bus:
+                        self.bus.publish({"type": "breaker.tripped", "task": task_id})
+                    continue
+                breaker.attempt()
                 progressed = True
                 self.dag.mark_running(task_id)
                 agent = self.agents.get(task.agent)
@@ -62,7 +89,6 @@ class Orchestrator:
                     self.dag.mark_failed(task_id)
                     failed = True
                     continue
-                # scoped context: only upstream (done) tasks' artifacts
                 upstream: list[Artifact] = [
                     a
                     for t in self.dag.tasks()
@@ -75,13 +101,14 @@ class Orchestrator:
                     artifacts = await agent.run(ctx)
                     result.artifacts.extend(artifacts)
                     self.dag.mark_done(task_id)
+                    breaker.record_success()
                 except Exception:
-                    self.dag.mark_failed(task_id)
-                    failed = True
+                    # leave it not-done so the breaker can retry next wave
+                    self.dag.mark_pending(task_id)
+                    if self.bus:
+                        self.bus.publish({"type": "task.error", "task": task_id})
             if not progressed:
-                # all ready tasks are gated -> wait for human approval, stop loop
                 break
-        # success requires all tasks done and no failures
         result.success = (not failed) and self.dag.is_complete()
         if self.bus:
             self.bus.publish(

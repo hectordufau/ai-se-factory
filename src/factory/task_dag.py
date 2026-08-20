@@ -76,6 +76,16 @@ class TaskDag:
             raise KeyError(id)
         self._tasks[id].status = TaskStatus.FAILED
 
+    def mark_pending(self, id: str) -> None:
+        if id not in self._tasks:
+            raise KeyError(id)
+        self._tasks[id].status = TaskStatus.PENDING
+
+    def status(self, id: str) -> TaskStatus:
+        if id not in self._tasks:
+            raise KeyError(id)
+        return self._tasks[id].status
+
     def is_complete(self) -> bool:
         return all(t.status == TaskStatus.DONE for t in self._tasks.values())
 
