@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+src/ai_se_factory.egg-info/PKG-INFO
+src/ai_se_factory.egg-info/SOURCES.txt
+src/ai_se_factory.egg-info/dependency_links.txt
+src/ai_se_factory.egg-info/requires.txt
+src/ai_se_factory.egg-info/top_level.txt
+src/evals/__init__.py
+src/factory/__init__.py
+src/factory/config.py
+src/factory/llm.py
+src/factory/model_router.py
+src/factory/models.py
+src/mcp/__init__.py
+tests/test_llm.py
