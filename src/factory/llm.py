@@ -41,6 +41,7 @@ class LLMClient:
         self.default_model = default_model
         self._api_key = api_key
         self._client = client
+        self.total_tokens = 0  # cumulative prompt+completion tokens across the run
 
     @property
     def client(self):
@@ -85,6 +86,15 @@ class LLMClient:
                 content = getattr(msg, "content", None) or ""
                 if not content:
                     content = getattr(msg, "reasoning_content", None) or ""
+                usage = getattr(resp, "usage", None)
+                if usage is not None:
+                    self.total_tokens += int(
+                        getattr(usage, "total_tokens", 0)
+                        or (
+                            int(getattr(usage, "prompt_tokens", 0) or 0)
+                            + int(getattr(usage, "completion_tokens", 0) or 0)
+                        )
+                    )
                 return content
             except Exception as exc:  # transient network/API errors
                 last_err = exc

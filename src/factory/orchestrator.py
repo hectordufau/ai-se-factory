@@ -30,6 +30,8 @@ class Orchestrator:
         required_gates: Optional[dict[str, str]] = None,
         # max retries per task before the circuit breaker trips
         max_attempts: int = 3,
+        # optional repo root for in-scope QA/security evidence collection
+        repo_root: Optional[str] = None,
     ) -> None:
         self.dag = dag
         self.agents = agents
@@ -39,6 +41,7 @@ class Orchestrator:
         self.max_attempts = max_attempts
         self._breakers: dict[str, CircuitBreaker] = {}
         self._result: Optional[RunResult] = None
+        self.repo_root = repo_root
 
     def _breaker(self, task_id: str) -> CircuitBreaker:
         if task_id not in self._breakers:
@@ -97,7 +100,11 @@ class Orchestrator:
                     for a in result.artifacts
                     if a.agent == t.agent
                 ]
-                ctx = AgentContext(requirement=requirement, upstream_artifacts=upstream)
+                ctx = AgentContext(
+                    requirement=requirement,
+                    upstream_artifacts=upstream,
+                    extra={"repo_root": self.repo_root} if self.repo_root else {},
+                )
                 try:
                     artifacts = await agent.run(ctx)
                     result.artifacts.extend(artifacts)

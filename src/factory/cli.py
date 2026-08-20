@@ -57,7 +57,10 @@ def build_pipeline(
     }
     required_gates = {"backend": "architect", "frontend": "architect", "database": "architect"}
     dag = build_dag()
-    return Orchestrator(dag, agents, gates=gates, required_gates=required_gates)
+    return Orchestrator(
+        dag, agents, gates=gates, required_gates=required_gates,
+        repo_root=str(repo_root) if repo_root else None,
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -80,7 +83,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     import asyncio
 
+    client = build_client(args.provider)
+    orch = build_pipeline(
+        args.requirement,
+        provider=args.provider,
+        repo_root=Path(args.repo) if args.repo else None,
+        github_repo=args.github_repo,
+    )
     result = asyncio.run(orch.run(args.requirement))
+    # Real token accounting from the LLM adapter.
+    result.metrics["tokens"] = getattr(client, "total_tokens", 0)
     from factory.evals.eval import EvalHarness
 
     print(EvalHarness().report(EvalHarness().score(result)))

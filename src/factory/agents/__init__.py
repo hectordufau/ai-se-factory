@@ -103,6 +103,65 @@ class RoleAgent(Agent):
                 )
         return out
 
+    async def _role_evidence(self, ctx: AgentContext) -> list[Artifact]:
+        """Role-specific real evidence, consumed by the EvalHarness.
+
+        QA runs the project test suite (if present) and Security runs static
+        checks; both emit artifacts with the `tool` meta the harness scores.
+        """
+        out: list[Artifact] = []
+        root = (ctx.extra or {}).get("repo_root")
+        if self.role == "qa" and root:
+            try:
+                import subprocess
+                r = subprocess.run(
+                    ["python", "-m", "pytest", "-q", str(root)],
+                    capture_output=True, text=True, timeout=120,
+                )
+                passed = failed = 0
+                for line in r.stdout.splitlines():
+                    if "passed" in line or "failed" in line:
+                        # e.g. "3 passed, 1 failed" or "1 passed in 0.00s"
+                        import re
+                        m = re.findall(r"(\d+) (passed|failed)", line)
+                        for n, kind in m:
+                            if kind == "passed":
+                                passed += int(n)
+                            else:
+                                failed += int(n)
+                out.append(Artifact(
+                    kind=ArtifactKind.REPORT, path="qa/test_results.json",
+                    content=r.stdout[-2000:], agent="qa",
+                    meta={"tool": "run_tests", "passed": passed, "failed": failed},
+                ))
+            except Exception as e:
+                out.append(Artifact(
+                    kind=ArtifactKind.REPORT, path="qa/test_results.json",
+                    content=str(e), agent="qa",
+                    meta={"tool": "run_tests", "passed": 0, "failed": 0, "error": str(e)},
+                ))
+        elif self.role == "security" and root:
+            import re, subprocess
+            findings = 0
+            patterns = [r"os\.system\(", r"eval\(", r"subprocess\.", r"shell=True",
+                        r"api_key\s*=\s*[\"']", r"password\s*=\s*[\"']", r"token\s*=\s*[\"']"]
+            r = None
+            try:
+                r = subprocess.run(
+                    ["grep", "-rniE", "|".join(patterns), "--include=*.py",
+                     "--include=*.js", "--include=*.ts", str(root)],
+                    capture_output=True, text=True, timeout=60,
+                )
+                findings = len([l for l in r.stdout.splitlines() if l.strip()])
+            except Exception:
+                findings = 0
+            out.append(Artifact(
+                kind=ArtifactKind.REPORT, path="security/scan.json",
+                content=r.stdout[:2000] if r is not None else "", agent="security",
+                meta={"tool": "scan", "findings": findings},
+            ))
+        return out
+
     async def run(self, ctx: AgentContext) -> list[Artifact]:
         """Run the agent, then persist any files it produced via MCP.
 
@@ -119,6 +178,11 @@ class RoleAgent(Agent):
             )
             written = await self.write_files(last_text)
             artifacts.extend(written)
+        # Real, scoreable evidence (QA tests, security scan) when a repo root
+        # is in scope.
+        if (ctx.extra or {}).get("repo_root"):
+            evidence = await self._role_evidence(ctx)
+            artifacts.extend(evidence)
         return artifacts
 
     def available_tools(self) -> list[dict]:
