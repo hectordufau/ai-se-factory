@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from factory.bus import EventBus
+from factory.mcp_base import MCPServer
 from factory.models import Artifact, ArtifactKind
 
 CompleteFn = Callable[..., Awaitable[str]]
@@ -22,6 +23,8 @@ class AgentContext:
     requirement: str
     upstream_artifacts: list[Artifact] = field(default_factory=list)
     worktree_path: Optional[str] = None
+    # MCP servers available to this agent (already scoped by the Orchestrator).
+    mcp: dict[str, MCPServer] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
