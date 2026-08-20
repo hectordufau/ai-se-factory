@@ -1,0 +1,15 @@
+services:
+  factory:
+    build: .
+    image: ai-se-factory:latest
+    environment:
+      # LLM provider auth (mount your real auth files or set env):
+      OPENCODE_ZEN_AUTH_PATH: /auth/opencode_auth.json
+      NOUS_AUTH_PATH: /auth/hermes_auth.json
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      - ./auth:/auth:ro
+      - ./workspace:/workspace
+    working_dir: /workspace
+    entrypoint: ["python", "-m", "factory"]
+    command: ["run", "--requirement", "Describe your requirement here"]
