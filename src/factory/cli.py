@@ -71,6 +71,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_p.add_argument("--provider", default="nous", choices=["nous", "zen"])
     run_p.add_argument("--repo", default=None, help="Repo root for MCP (default: cwd)")
     run_p.add_argument("--github-repo", default=None, help="owner/name for GitHub MCP")
+    run_p.add_argument("--evidence-dir", default=None,
+                       help="Directory to write EVIDENCE.md + run_result.json")
     args = parser.parse_args(argv)
     if args.cmd != "run":
         parser.print_help()
@@ -96,6 +98,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     from factory.evals.eval import EvalHarness
 
     print(EvalHarness().report(EvalHarness().score(result)))
+    if args.evidence_dir:
+        from factory.exporter import export
+
+        paths = export(result, args.evidence_dir)
+        print(f"[evidence] wrote {paths['evidence_md']} and {paths['run_result_json']}")
     return 0 if result.success else 2
 
 
